@@ -4,3 +4,4 @@ __pycache__/
 .env
 .DS_Store
 cbc2026-9d97f11665da.json
+*.log
