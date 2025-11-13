@@ -119,6 +119,13 @@ def nearest_day_match(target: date, daily_totals: Dict[date, Dict[str, int]]) ->
     return None
 
 
+def latest_available_day(
+    reference: date, daily_totals: Dict[date, Dict[str, int]]
+) -> Optional[date]:
+    candidates = [day for day in daily_totals if day <= reference]
+    return max(candidates) if candidates else None
+
+
 def ensure_private(message: Message) -> bool:
     return message.chat.type == "private"
 
@@ -156,8 +163,9 @@ async def handle_today(
         return
     today = current_date or date.today()
     snapshot = await service.get_snapshot()
-    totals = snapshot.daily_totals.get(today)
-    text = format_daily_table(today, totals)
+    target_day = latest_available_day(today, snapshot.daily_totals) or today
+    totals = snapshot.daily_totals.get(target_day)
+    text = format_daily_table(target_day, totals)
     await message.answer(text)
 
 
