@@ -128,7 +128,7 @@ def build_help_text() -> str:
         "Hi! I can show marathon step stats.\n"
         "/leaderboard — total steps per team.\n"
         "/today — steps added today.\n"
-        "/daybyday <DD.MM> — steps per team for a specific day.\n"
+        "/daybyday &lt;DD.MM&gt; — steps per team for a specific day.\n"
         "In groups only /report is available (also works in private chat)."
     )
 
