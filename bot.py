@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -26,6 +27,7 @@ from generate_report_from_sheet import (
 )
 
 CACHE_TTL_SECONDS = 300
+DAILY_REPORT_CHAT_ID = -5052868617
 
 
 logger = logging.getLogger("cbc_bot")
@@ -157,6 +159,28 @@ def ensure_private(message: Message) -> bool:
     return True
 
 
+def compose_report(snapshot: DataSnapshot, reference_date: date) -> tuple[str, Optional[date]]:
+    totals_text = format_totals_table(snapshot.team_totals, "Команды — топ по шагам")
+
+    previous_day = reference_date - timedelta(days=1)
+    if previous_day not in snapshot.daily_totals:
+        previous_candidates = [d for d in snapshot.daily_totals.keys() if d < reference_date]
+        previous_day = max(previous_candidates) if previous_candidates else None
+
+    if previous_day:
+        daily_text = format_daily_table(
+            previous_day, snapshot.daily_totals.get(previous_day)
+        )
+        response = f"{totals_text}\n\nПрирост за последний день:\n{daily_text}"
+    else:
+        response = (
+            f"{totals_text}\n\nПрирост за последний день:\n"
+            "Данные для предыдущего дня недоступны."
+        )
+
+    return response, previous_day
+
+
 def build_help_text() -> str:
     return (
         "/leaderboard — общая таблица.\n"
@@ -272,34 +296,73 @@ async def handle_report(
         message.chat.type,
     )
     snapshot = await service.get_snapshot()
-    totals_text = format_totals_table(snapshot.team_totals, "Команды — топ по шагам")
-
     today = current_date or date.today()
-    previous_day = today - timedelta(days=1)
-    if previous_day not in snapshot.daily_totals:
-        previous_candidates = [d for d in snapshot.daily_totals.keys() if d < today]
-        previous_day = max(previous_candidates) if previous_candidates else None
-
+    response, previous_day = compose_report(snapshot, today)
     if previous_day:
-        daily_text = format_daily_table(
-            previous_day, snapshot.daily_totals.get(previous_day)
-        )
-        response = f"{totals_text}\n\nПрирост за последний день:\n{daily_text}"
         logger.info(
             "Replying /report chat_id=%s previous_day=%s",
             message.chat.id,
             previous_day.isoformat(),
         )
     else:
-        response = (
-            f"{totals_text}\n\nПрирост за последний день:\nДанные для предыдущего дня недоступны."
-        )
         logger.info(
             "Replying /report chat_id=%s previous_day=missing",
             message.chat.id,
         )
-
     await message.answer(response)
+
+
+async def daily_report_loop(
+    bot: Bot,
+    service: SheetDataService,
+    chat_id: int,
+    hour: int = 18,
+    minute: int = 0,
+) -> None:
+    logger.info(
+        "Daily report scheduling enabled for chat_id=%s at %02d:%02d",
+        chat_id,
+        hour,
+        minute,
+    )
+    try:
+        while True:
+            now = datetime.now()
+            target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if now >= target:
+                target += timedelta(days=1)
+            wait_seconds = max(0, (target - now).total_seconds())
+            logger.info(
+                "Next scheduled report for chat_id=%s at %s (in %.0fs)",
+                chat_id,
+                target.isoformat(),
+                wait_seconds,
+            )
+            try:
+                await asyncio.sleep(wait_seconds)
+            except asyncio.CancelledError:
+                logger.info("Daily report loop cancelled while waiting for chat_id=%s", chat_id)
+                raise
+
+            try:
+                snapshot = await service.get_snapshot(force=True)
+                response, previous_day = compose_report(snapshot, target.date())
+                await bot.send_message(chat_id, response)
+                logger.info(
+                    "Scheduled report sent chat_id=%s previous_day=%s",
+                    chat_id,
+                    previous_day.isoformat() if previous_day else "missing",
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Failed to send scheduled report to chat_id=%s", chat_id
+                )
+                await asyncio.sleep(10)
+    except asyncio.CancelledError:
+        logger.info("Daily report loop task cancelled for chat_id=%s", chat_id)
+        raise
 
 
 def create_router(service: SheetDataService):
@@ -356,9 +419,15 @@ async def run_bot(args: argparse.Namespace) -> None:
     dp = Dispatcher()
     dp.include_router(create_router(service))
 
+    scheduler_task = asyncio.create_task(
+        daily_report_loop(bot, service, DAILY_REPORT_CHAT_ID)
+    )
     try:
         await dp.start_polling(bot)
     finally:
+        scheduler_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await scheduler_task
         logger.info("Shutting down bot")
         await bot.session.close()
 
