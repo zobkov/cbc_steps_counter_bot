@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Telegram bot that reports marathon step statistics from Google Sheets."""
 
 from __future__ import annotations
 
@@ -7,7 +6,7 @@ import argparse
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -27,6 +26,9 @@ from generate_report_from_sheet import (
 )
 
 CACHE_TTL_SECONDS = 300
+
+
+logger = logging.getLogger("cbc_bot")
 
 
 @dataclass
@@ -56,17 +58,30 @@ class SheetDataService:
         self._expires_at = datetime.min
 
     async def get_snapshot(self, force: bool = False) -> DataSnapshot:
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
         async with self._lock:
             if not force and self._snapshot and now < self._expires_at:
+                logger.info("Reusing cached snapshot (expires_in=%ss)", int((self._expires_at - now).total_seconds()))
                 return self._snapshot
 
             snapshot = await asyncio.to_thread(self._load_snapshot)
             self._snapshot = snapshot
             self._expires_at = now + timedelta(seconds=self._cache_ttl)
+            logger.info(
+                "Refreshed snapshot: entries=%s teams=%s days=%s",
+                len(snapshot.entries),
+                len(snapshot.team_totals),
+                len(snapshot.daily_totals),
+            )
             return snapshot
 
     def _load_snapshot(self) -> DataSnapshot:
+        logger.info(
+            "Loading rows from sheet_id=%s sheet=%s range=%s",
+            self._spreadsheet_id,
+            self._sheet_name,
+            self._value_range,
+        )
         rows = fetch_sheet_rows(
             spreadsheet_id=self._spreadsheet_id,
             sheet=self._sheet_name,
@@ -76,17 +91,22 @@ class SheetDataService:
         entries = collect_valid_entries(rows)
         totals = aggregate_by_team(entries)
         daily_totals = build_daily_totals(entries)
+        logger.info(
+            "Loaded sheet data: raw_rows=%s valid_entries=%s",
+            len(rows),
+            len(entries),
+        )
         return DataSnapshot(
             entries=entries,
             team_totals=totals,
             daily_totals=daily_totals,
-            fetched_at=datetime.utcnow(),
+            fetched_at=datetime.now(UTC),
         )
 
 
 def format_totals_table(totals: Dict[str, int], title: str) -> str:
     if not totals:
-        return f"{title}\nNo data available."
+        return f"{title}\nНет доступных данных по этому запросу."
 
     lines = [title]
     for idx, (team, steps) in enumerate(
@@ -99,13 +119,13 @@ def format_totals_table(totals: Dict[str, int], title: str) -> str:
 def format_daily_table(target_day: date, totals: Optional[Dict[str, int]]) -> str:
     label = target_day.strftime("%d.%m.%Y")
     if not totals:
-        return f"{label}\nNo submissions for this day."
+        return f"{label}\nНет доступных данных по этому дню."
 
     lines = [label]
     for idx, (team, steps) in enumerate(
         sorted(totals.items(), key=lambda item: item[1], reverse=True), start=1
     ):
-        lines.append(f"{idx}. {team}: {steps}")
+        lines.append(f"{idx}. {team}: +{steps}")
     return "\n".join(lines)
 
 
@@ -127,29 +147,37 @@ def latest_available_day(
 
 
 def ensure_private(message: Message) -> bool:
-    return message.chat.type == "private"
+    if message.chat.type != "private":
+        logger.info(
+            "Rejecting command in non-private chat_id=%s chat_type=%s",
+            message.chat.id,
+            message.chat.type,
+        )
+        return False
+    return True
 
 
 def build_help_text() -> str:
     return (
-        "Hi! I can show marathon step stats.\n"
-        "/leaderboard — total steps per team.\n"
-        "/today — steps added today.\n"
-        "/daybyday &lt;DD.MM&gt; — steps per team for a specific day.\n"
-        "In groups only /report is available (also works in private chat)."
+        "/leaderboard — общая таблица.\n"
+        "/today — Посомтреть сколько было добавлено шагов за вчерашний день.\n"
+        "/daybyday &lt;DD.MM&gt; — посмотреть статистику за определенный день по командам.\n\n"
+        "В груп. чате только /report доступен (тут тоже работает). Отображает таблицу лидеров и стату за предыдущий день"
     )
 
 
 async def handle_start(message: Message) -> None:
+    logger.info("Handling /start chat_id=%s", message.chat.id)
     await message.answer(build_help_text())
 
 
 async def handle_leaderboard(message: Message, service: SheetDataService) -> None:
     if not ensure_private(message):
-        await message.answer("Please use this command in a private chat with the bot.")
+        await message.answer("Эта команда доступна только в личном чате с ботом.")
         return
+    logger.info("Handling /leaderboard chat_id=%s", message.chat.id)
     snapshot = await service.get_snapshot()
-    text = format_totals_table(snapshot.team_totals, "Teams — total steps")
+    text = format_totals_table(snapshot.team_totals, "Команды — топ по шагам")
     await message.answer(text)
 
 
@@ -159,12 +187,23 @@ async def handle_today(
     current_date: Optional[date] = None,
 ) -> None:
     if not ensure_private(message):
-        await message.answer("Please use this command in a private chat with the bot.")
+        await message.answer("Эта команда доступна только в личном чате с ботом.")
         return
     today = current_date or date.today()
+    logger.info(
+        "Handling /today chat_id=%s reference_date=%s",
+        message.chat.id,
+        today.isoformat(),
+    )
     snapshot = await service.get_snapshot()
     target_day = latest_available_day(today, snapshot.daily_totals) or today
     totals = snapshot.daily_totals.get(target_day)
+    logger.info(
+        "Replying /today chat_id=%s target_day=%s entries=%s",
+        message.chat.id,
+        target_day.isoformat(),
+        0 if totals is None else len(totals),
+    )
     text = format_daily_table(target_day, totals)
     await message.answer(text)
 
@@ -176,27 +215,48 @@ async def handle_daybyday(
     current_date: Optional[date] = None,
 ) -> None:
     if not ensure_private(message):
-        await message.answer("Please use this command in a private chat with the bot.")
+        await message.answer("Эта команда доступна только в личном чате с ботом.")
         return
     argument = (argument or "").strip()
+    logger.info(
+        "Handling /daybyday chat_id=%s argument=%r",
+        message.chat.id,
+        argument,
+    )
     if not argument:
-        await message.answer("Usage: /daybyday DD.MM")
+        await message.answer("Использование: /daybyday DD.MM")
         return
     today = current_date or date.today()
     try:
         target = datetime.strptime(argument, "%d.%m").date()
         target = target.replace(year=today.year)
     except ValueError:
-        await message.answer("Cannot parse date. Use DD.MM format.")
+        logger.info(
+            "Failed to parse /daybyday argument chat_id=%s argument=%r",
+            message.chat.id,
+            argument,
+        )
+        await message.answer("Ошибка в дате. Используй DD.MM формат.")
         return
 
     snapshot = await service.get_snapshot()
     matched_day = nearest_day_match(target, snapshot.daily_totals)
     if not matched_day:
-        await message.answer("No matching day found in the data set.")
+        logger.info(
+            "No data for /daybyday chat_id=%s target=%s",
+            message.chat.id,
+            target.isoformat(),
+        )
+        await message.answer("Ничего не нашлось для этого дня.")
         return
 
     totals = snapshot.daily_totals.get(matched_day)
+    logger.info(
+        "Replying /daybyday chat_id=%s matched_day=%s entries=%s",
+        message.chat.id,
+        matched_day.isoformat(),
+        0 if totals is None else len(totals),
+    )
     text = format_daily_table(matched_day, totals)
     await message.answer(text)
 
@@ -206,8 +266,13 @@ async def handle_report(
     service: SheetDataService,
     current_date: Optional[date] = None,
 ) -> None:
+    logger.info(
+        "Handling /report chat_id=%s chat_type=%s",
+        message.chat.id,
+        message.chat.type,
+    )
     snapshot = await service.get_snapshot()
-    totals_text = format_totals_table(snapshot.team_totals, "Teams — total steps")
+    totals_text = format_totals_table(snapshot.team_totals, "Команды — топ по шагам")
 
     today = current_date or date.today()
     previous_day = today - timedelta(days=1)
@@ -219,10 +284,19 @@ async def handle_report(
         daily_text = format_daily_table(
             previous_day, snapshot.daily_totals.get(previous_day)
         )
-        response = f"{totals_text}\n\nLast day increase:\n{daily_text}"
+        response = f"{totals_text}\n\nПрирост за последний день:\n{daily_text}"
+        logger.info(
+            "Replying /report chat_id=%s previous_day=%s",
+            message.chat.id,
+            previous_day.isoformat(),
+        )
     else:
         response = (
-            f"{totals_text}\n\nLast day increase:\nNo previous day data available."
+            f"{totals_text}\n\nПрирост за последний день:\nДанные для предыдущего дня недоступны."
+        )
+        logger.info(
+            "Replying /report chat_id=%s previous_day=missing",
+            message.chat.id,
         )
 
     await message.answer(response)
@@ -259,6 +333,13 @@ def create_router(service: SheetDataService):
 async def run_bot(args: argparse.Namespace) -> None:
     logging.basicConfig(level=logging.INFO)
     token = load_token(args.env_var)
+    logger.info(
+        "Starting bot with sheet_id=%s sheet=%s range=%s cache_ttl=%s",
+        args.spreadsheet_id,
+        args.sheet,
+        args.range,
+        args.cache_ttl,
+    )
 
     service = SheetDataService(
         spreadsheet_id=args.spreadsheet_id,
@@ -278,6 +359,7 @@ async def run_bot(args: argparse.Namespace) -> None:
     try:
         await dp.start_polling(bot)
     finally:
+        logger.info("Shutting down bot")
         await bot.session.close()
 
 
