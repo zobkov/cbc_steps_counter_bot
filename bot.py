@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+from logging.handlers import TimedRotatingFileHandler
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -316,8 +317,8 @@ async def daily_report_loop(
     bot: Bot,
     service: SheetDataService,
     chat_id: int,
-    hour: int = 18,
-    minute: int = 0,
+    hour: int = 21,
+    minute: int = 5,
 ) -> None:
     logger.info(
         "Daily report scheduling enabled for chat_id=%s at %02d:%02d",
@@ -394,7 +395,21 @@ def create_router(service: SheetDataService):
 
 
 async def run_bot(args: argparse.Namespace) -> None:
-    logging.basicConfig(level=logging.INFO)
+    logs_dir = Path("logs")
+    logs_dir.mkdir(exist_ok=True)
+
+    logging.basicConfig(level=logging.INFO, handlers=[logging.StreamHandler()])
+    file_handler = TimedRotatingFileHandler(
+        logs_dir / "bot.log",
+        when="midnight",
+        backupCount=7,
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    )
+    logging.getLogger().addHandler(file_handler)
+
     token = load_token(args.env_var)
     logger.info(
         "Starting bot with sheet_id=%s sheet=%s range=%s cache_ttl=%s",
@@ -423,6 +438,7 @@ async def run_bot(args: argparse.Namespace) -> None:
         daily_report_loop(bot, service, DAILY_REPORT_CHAT_ID)
     )
     try:
+        await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
     finally:
         scheduler_task.cancel()
