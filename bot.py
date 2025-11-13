@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import Message
@@ -75,7 +76,12 @@ class SheetDataService:
         entries = collect_valid_entries(rows)
         totals = aggregate_by_team(entries)
         daily_totals = build_daily_totals(entries)
-        return DataSnapshot(entries=entries, team_totals=totals, daily_totals=daily_totals, fetched_at=datetime.utcnow())
+        return DataSnapshot(
+            entries=entries,
+            team_totals=totals,
+            daily_totals=daily_totals,
+            fetched_at=datetime.utcnow(),
+        )
 
 
 def format_totals_table(totals: Dict[str, int], title: str) -> str:
@@ -127,6 +133,93 @@ def build_help_text() -> str:
     )
 
 
+async def handle_start(message: Message) -> None:
+    await message.answer(build_help_text())
+
+
+async def handle_leaderboard(message: Message, service: SheetDataService) -> None:
+    if not ensure_private(message):
+        await message.answer("Please use this command in a private chat with the bot.")
+        return
+    snapshot = await service.get_snapshot()
+    text = format_totals_table(snapshot.team_totals, "Teams — total steps")
+    await message.answer(text)
+
+
+async def handle_today(
+    message: Message,
+    service: SheetDataService,
+    current_date: Optional[date] = None,
+) -> None:
+    if not ensure_private(message):
+        await message.answer("Please use this command in a private chat with the bot.")
+        return
+    today = current_date or date.today()
+    snapshot = await service.get_snapshot()
+    totals = snapshot.daily_totals.get(today)
+    text = format_daily_table(today, totals)
+    await message.answer(text)
+
+
+async def handle_daybyday(
+    message: Message,
+    service: SheetDataService,
+    argument: Optional[str],
+    current_date: Optional[date] = None,
+) -> None:
+    if not ensure_private(message):
+        await message.answer("Please use this command in a private chat with the bot.")
+        return
+    argument = (argument or "").strip()
+    if not argument:
+        await message.answer("Usage: /daybyday DD.MM")
+        return
+    today = current_date or date.today()
+    try:
+        target = datetime.strptime(argument, "%d.%m").date()
+        target = target.replace(year=today.year)
+    except ValueError:
+        await message.answer("Cannot parse date. Use DD.MM format.")
+        return
+
+    snapshot = await service.get_snapshot()
+    matched_day = nearest_day_match(target, snapshot.daily_totals)
+    if not matched_day:
+        await message.answer("No matching day found in the data set.")
+        return
+
+    totals = snapshot.daily_totals.get(matched_day)
+    text = format_daily_table(matched_day, totals)
+    await message.answer(text)
+
+
+async def handle_report(
+    message: Message,
+    service: SheetDataService,
+    current_date: Optional[date] = None,
+) -> None:
+    snapshot = await service.get_snapshot()
+    totals_text = format_totals_table(snapshot.team_totals, "Teams — total steps")
+
+    today = current_date or date.today()
+    previous_day = today - timedelta(days=1)
+    if previous_day not in snapshot.daily_totals:
+        previous_candidates = [d for d in snapshot.daily_totals.keys() if d < today]
+        previous_day = max(previous_candidates) if previous_candidates else None
+
+    if previous_day:
+        daily_text = format_daily_table(
+            previous_day, snapshot.daily_totals.get(previous_day)
+        )
+        response = f"{totals_text}\n\nLast day increase:\n{daily_text}"
+    else:
+        response = (
+            f"{totals_text}\n\nLast day increase:\nNo previous day data available."
+        )
+
+    await message.answer(response)
+
+
 def create_router(service: SheetDataService):
     from aiogram import Router
 
@@ -134,70 +227,23 @@ def create_router(service: SheetDataService):
 
     @router.message(CommandStart())
     async def cmd_start(message: Message) -> None:
-        await message.answer(build_help_text())
+        await handle_start(message)
 
     @router.message(Command("leaderboard"))
     async def cmd_leaderboard(message: Message) -> None:
-        if not ensure_private(message):
-            await message.answer("Please use this command in a private chat with the bot.")
-            return
-        snapshot = await service.get_snapshot()
-        text = format_totals_table(snapshot.team_totals, "Teams — total steps")
-        await message.answer(text)
+        await handle_leaderboard(message, service)
 
     @router.message(Command("today"))
     async def cmd_today(message: Message) -> None:
-        if not ensure_private(message):
-            await message.answer("Please use this command in a private chat with the bot.")
-            return
-        snapshot = await service.get_snapshot()
-        today = date.today()
-        totals = snapshot.daily_totals.get(today)
-        text = format_daily_table(today, totals)
-        await message.answer(text)
+        await handle_today(message, service)
 
     @router.message(Command("daybyday"))
     async def cmd_daybyday(message: Message, command: CommandObject) -> None:
-        if not ensure_private(message):
-            await message.answer("Please use this command in a private chat with the bot.")
-            return
-        argument = (command.args or "").strip()
-        if not argument:
-            await message.answer("Usage: /daybyday DD.MM")
-            return
-        try:
-            target = datetime.strptime(argument, "%d.%m").date()
-            target = target.replace(year=date.today().year)
-        except ValueError:
-            await message.answer("Cannot parse date. Use DD.MM format.")
-            return
-        snapshot = await service.get_snapshot()
-        matched_day = nearest_day_match(target, snapshot.daily_totals)
-        if not matched_day:
-            await message.answer("No matching day found in the data set.")
-            return
-        totals = snapshot.daily_totals.get(matched_day)
-        text = format_daily_table(matched_day, totals)
-        await message.answer(text)
+        await handle_daybyday(message, service, command.args)
 
     @router.message(Command("report"))
     async def cmd_report(message: Message) -> None:
-        snapshot = await service.get_snapshot()
-        totals_text = format_totals_table(snapshot.team_totals, "Teams — total steps")
-
-        today = date.today()
-        previous_day = today - timedelta(days=1)
-        if previous_day not in snapshot.daily_totals:
-            previous_candidates = [d for d in snapshot.daily_totals.keys() if d < today]
-            previous_day = max(previous_candidates) if previous_candidates else None
-
-        if previous_day:
-            daily_text = format_daily_table(previous_day, snapshot.daily_totals.get(previous_day))
-            response = f"{totals_text}\n\nLast day increase:\n{daily_text}"
-        else:
-            response = f"{totals_text}\n\nLast day increase:\nNo previous day data available."
-
-        await message.answer(response)
+        await handle_report(message, service)
 
     return router
 
@@ -214,7 +260,10 @@ async def run_bot(args: argparse.Namespace) -> None:
         cache_ttl=args.cache_ttl,
     )
 
-    bot = Bot(token=token, parse_mode=ParseMode.HTML)
+    bot = Bot(
+        token=token,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
     dp = Dispatcher()
     dp.include_router(create_router(service))
 
