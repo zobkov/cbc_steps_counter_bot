@@ -1,5 +1,5 @@
 import sys
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,8 +22,9 @@ from bot import (
 
 
 class DummyMessage:
-    def __init__(self, chat_type: str = "private") -> None:
-        self.chat = SimpleNamespace(type=chat_type)
+    def __init__(self, chat_type: str = "private", chat_id: int | None = None) -> None:
+        assigned_id = chat_id if chat_id is not None else (42 if chat_type == "private" else -100)
+        self.chat = SimpleNamespace(type=chat_type, id=assigned_id)
         self.answers: list[str] = []
 
     async def answer(self, text: str) -> None:
@@ -49,7 +50,7 @@ def sample_snapshot() -> DataSnapshot:
             date(2025, 11, 9): {"Team A": 120},
             date(2025, 11, 10): {"Team A": 80, "Team B": 150},
         },
-        fetched_at=datetime.utcnow(),
+        fetched_at=datetime.now(UTC),
     )
 
 
@@ -67,12 +68,12 @@ async def test_leaderboard_private(sample_snapshot: DataSnapshot) -> None:
 
 @pytest.mark.asyncio
 async def test_leaderboard_group_rejected(sample_snapshot: DataSnapshot) -> None:
-    message = DummyMessage("group")
+    message = DummyMessage("group", chat_id=-200)
     service = FakeService(sample_snapshot)
 
     await handle_leaderboard(message, service)
 
-    assert message.answers == ["Please use this command in a private chat with the bot."]
+    assert message.answers == ["Эта команда доступна только в личном чате с ботом."]
     assert service.calls == 0
 
 
@@ -89,13 +90,31 @@ async def test_today_uses_current_date(sample_snapshot: DataSnapshot) -> None:
 
 
 @pytest.mark.asyncio
-async def test_today_no_data(sample_snapshot: DataSnapshot) -> None:
+async def test_today_falls_back_to_latest_day(sample_snapshot: DataSnapshot) -> None:
     message = DummyMessage()
     service = FakeService(sample_snapshot)
 
     await handle_today(message, service, current_date=date(2025, 11, 11))
 
-    assert message.answers == ["11.11.2025\nNo submissions for this day."]
+    assert message.answers
+    assert "10.11.2025" in message.answers[0]
+    assert "Team B" in message.answers[0]
+
+
+@pytest.mark.asyncio
+async def test_today_no_data_available() -> None:
+    snapshot = DataSnapshot(
+        entries={},
+        team_totals={},
+        daily_totals={},
+        fetched_at=datetime.now(UTC),
+    )
+    message = DummyMessage()
+    service = FakeService(snapshot)
+
+    await handle_today(message, service, current_date=date(2025, 11, 10))
+
+    assert message.answers == ["10.11.2025\nНет доступных данных по этому дню."]
 
 
 @pytest.mark.asyncio
@@ -105,7 +124,7 @@ async def test_daybyday_argument_required(sample_snapshot: DataSnapshot) -> None
 
     await handle_daybyday(message, service, argument="")
 
-    assert message.answers == ["Usage: /daybyday DD.MM"]
+    assert message.answers == ["Использование: /daybyday DD.MM"]
 
 
 @pytest.mark.asyncio
@@ -115,7 +134,7 @@ async def test_daybyday_invalid_date(sample_snapshot: DataSnapshot) -> None:
 
     await handle_daybyday(message, service, argument="not-a-date")
 
-    assert message.answers == ["Cannot parse date. Use DD.MM format."]
+    assert message.answers == ["Ошибка в дате. Используй DD.MM формат."]
 
 
 @pytest.mark.asyncio
@@ -137,7 +156,7 @@ async def test_daybyday_no_match(sample_snapshot: DataSnapshot) -> None:
 
     await handle_daybyday(message, service, argument="08.11", current_date=date(2025, 11, 15))
 
-    assert message.answers == ["No matching day found in the data set."]
+    assert message.answers == ["Ничего не нашлось для этого дня."]
 
 
 @pytest.mark.asyncio
@@ -148,7 +167,7 @@ async def test_report_uses_previous_day(sample_snapshot: DataSnapshot) -> None:
     await handle_report(message, service, current_date=date(2025, 11, 11))
 
     assert message.answers
-    assert "Teams — total steps" in message.answers[0]
+    assert "Команды — топ по шагам" in message.answers[0]
     assert "10.11.2025" in message.answers[0]
 
 
@@ -158,14 +177,14 @@ async def test_report_without_previous_day() -> None:
         entries={},
         team_totals={"Team A": 50},
         daily_totals={},
-        fetched_at=datetime.utcnow(),
+        fetched_at=datetime.now(UTC),
     )
     message = DummyMessage()
     service = FakeService(snapshot)
 
     await handle_report(message, service, current_date=date(2025, 11, 10))
 
-    assert "No previous day data available." in message.answers[0]
+    assert "Данные для предыдущего дня недоступны." in message.answers[0]
 
 
 def test_nearest_day_match_same_day(sample_snapshot: DataSnapshot) -> None:
@@ -194,4 +213,4 @@ def test_format_helpers() -> None:
     assert "10.11.2025" in daily_text
 
     empty_daily = format_daily_table(date(2025, 11, 12), None)
-    assert "No submissions" in empty_daily
+    assert "Нет доступных данных" in empty_daily
