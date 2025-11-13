@@ -1,0 +1,6 @@
+Отметка времени,Отметка дня,Название команды ,Количество шагов за день,"Загрузи скриншот, который подтверждает количество шагов",Адрес электронной почты
+13.11.2025 09:00:00,12.11.2025,Team Alpha,1000,https://example.com/a,alpha@example.com
+13.11.2025 09:05:00,12.11.2025,Team Alpha,900,https://example.com/b,alpha@example.com
+13.11.2025 09:10:00,12.11.2025,Team Beta,500,https://example.com/c,beta@example.com
+12.11.2025 08:00:00,11.11.2025,Team Gamma,200,https://example.com/d,gamma@example.com
+12.11.2025 07:50:00,11.11.2025,Team Gamma,150,https://example.com/e,gamma@example.com
