@@ -133,19 +133,33 @@ def fetch_sheet_rows(
     if not values:
         return []
 
-    header = values[0]
-    missing = [column for column in REQUIRED_COLUMNS if column not in header]
-    if missing:
+    def _normalize(value: str) -> str:
+        return " ".join(value.strip().split()).casefold()
+
+    normalized_required = {_normalize(column) for column in REQUIRED_COLUMNS}
+    header_row_idx = None
+    header: List[str] | None = None
+    for idx, raw in enumerate(values):
+        cleaned = [cell.strip() for cell in raw]
+        normalized = {_normalize(cell) for cell in cleaned}
+        if normalized_required.issubset(normalized):
+            header_row_idx = idx
+            header = cleaned
+            break
+
+    if header is None or header_row_idx is None:
         raise ValidationError(
-            "Worksheet is missing required columns: " + ", ".join(sorted(missing))
+            "Worksheet is missing required columns even after scanning the sheet."
         )
 
-    header_indexes = {name: idx for idx, name in enumerate(header)}
+    header_indexes = {_normalize(name): idx for idx, name in enumerate(header)}
     rows: List[Dict[str, str]] = []
-    for raw in values[1:]:
+    for raw in values[header_row_idx + 1 :]:
         row: Dict[str, str] = {}
         for column in header:
-            idx = header_indexes[column]
+            idx = header_indexes.get(_normalize(column))
+            if idx is None:
+                continue
             row[column] = raw[idx].strip() if idx < len(raw) else ""
         rows.append(row)
 

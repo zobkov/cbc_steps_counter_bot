@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import os
 from collections import defaultdict
 from datetime import datetime, date
 from pathlib import Path
@@ -14,7 +13,7 @@ from typing import Dict, Iterable, Tuple
 # Column names from the exported Google Forms CSV.
 COLUMN_TIMESTAMP = "Отметка времени"
 COLUMN_DAY = "Отметка дня"
-COLUMN_TEAM = "Название команды "
+COLUMN_TEAM = "Название команды"
 COLUMN_STEPS = "Количество шагов за день"
 COLUMN_EMAIL = "Адрес электронной почты"
 
@@ -57,13 +56,16 @@ def parse_args() -> argparse.Namespace:
 def read_rows(csv_path: Path) -> Iterable[Dict[str, str]]:
     with csv_path.open("r", encoding="utf-8-sig", newline="") as csv_file:
         reader = csv.DictReader(csv_file)
+        if reader.fieldnames is None:
+            return
+        reader.fieldnames = [field.strip() for field in reader.fieldnames]
         missing = {col for col in _required_columns() if col not in reader.fieldnames}
         if missing:
             raise ValidationError(
                 "CSV file is missing required columns: " + ", ".join(sorted(missing))
             )
         for row in reader:
-            yield row
+            yield {key.strip(): value for key, value in row.items()}
 
 
 def _required_columns() -> Tuple[str, ...]:
@@ -127,7 +129,7 @@ def collect_valid_entries(rows: Iterable[Dict[str, str]]) -> Dict[Tuple[str, dat
 
 def aggregate_by_team(entries: Dict[Tuple[str, date], Tuple[datetime, str, int]]) -> Dict[str, int]:
     team_totals: Dict[str, int] = defaultdict(int)
-    for submitted_at, team, steps in entries.values():
+    for _, team, steps in entries.values():
         team_totals[team] += steps
     return team_totals
 
