@@ -1,6 +1,6 @@
-#!/usr/bin/env python3
-
 from __future__ import annotations
+
+import os
 
 import argparse
 import asyncio
@@ -12,10 +12,12 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Dict, Optional
 
-from aiogram import Bot, Dispatcher
+from dotenv import load_dotenv as _load_dotenv
+
+from aiogram import Bot, Dispatcher, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.filters import Command, CommandObject, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart, Filter
 from aiogram.types import Message
 
 from generate_daily_breakdown import build_daily_totals
@@ -29,7 +31,7 @@ from generate_report_from_sheet import (
 
 CACHE_TTL_SECONDS = 300
 DAILY_REPORT_CHAT_ID = -5052868617
-
+ADMIN_IDS = [257026813]
 
 logger = logging.getLogger("cbc_bot")
 
@@ -366,9 +368,24 @@ async def daily_report_loop(
         raise
 
 
-def create_router(service: SheetDataService):
-    from aiogram import Router
+def _check_admin(user_id: int) -> bool:
+    if user_id in ADMIN_IDS:
+        return False
+    return True
 
+class AdminFilter(Filter):
+    """Admin filter. Returns bool when calle. Takes admin_ids list at init"""
+    def __init__(self, admin_ids: list[int]):
+        self.admin_ids = admin_ids
+
+    async def __call__(self, message: Message) -> bool:
+        is_admin = message.from_user.id in self.admin_ids
+        logger.debug("User %s checked for admin. Result: %s", message.from_user.id, is_admin)
+        return is_admin
+    
+
+
+def create_router(service: SheetDataService):
     router = Router()
 
     @router.message(CommandStart())
@@ -394,11 +411,19 @@ def create_router(service: SheetDataService):
     return router
 
 
+def _load_admin_mode() -> bool:
+    env_var = "ADMIN_MODE"
+    if _load_dotenv:
+        _load_dotenv()
+
+    admin_mode = os.getenv(env_var)
+    return admin_mode
+
 async def run_bot(args: argparse.Namespace) -> None:
     logs_dir = Path("logs")
     logs_dir.mkdir(exist_ok=True)
 
-    logging.basicConfig(level=logging.INFO, handlers=[logging.StreamHandler()])
+    logging.basicConfig(level=logging.DEBUG, handlers=[logging.StreamHandler()])
     file_handler = TimedRotatingFileHandler(
         logs_dir / "bot.log",
         when="midnight",
@@ -419,6 +444,8 @@ async def run_bot(args: argparse.Namespace) -> None:
         args.cache_ttl,
     )
 
+    ADMIN_MODE = _load_admin_mode()
+
     service = SheetDataService(
         spreadsheet_id=args.spreadsheet_id,
         sheet_name=args.sheet,
@@ -432,7 +459,16 @@ async def run_bot(args: argparse.Namespace) -> None:
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     dp = Dispatcher()
-    dp.include_router(create_router(service))
+    router: Router = create_router(service)
+
+    logger.debug("ADMIN MODE is %s", ADMIN_MODE)
+
+    if ADMIN_MODE:
+        admin_filter = AdminFilter(ADMIN_IDS)
+        router.message.filter(admin_filter)
+        router.callback_query.filter(admin_filter)
+
+    dp.include_router(router)
 
     scheduler_task = asyncio.create_task(
         daily_report_loop(bot, service, DAILY_REPORT_CHAT_ID)
