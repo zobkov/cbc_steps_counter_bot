@@ -28,7 +28,7 @@ from generate_report_from_sheet import (
 )
 
 CACHE_TTL_SECONDS = 300
-DAILY_REPORT_CHAT_ID = -5038274164
+DAILY_REPORT_CHAT_ID = -5052868617
 
 
 logger = logging.getLogger("cbc_bot")
