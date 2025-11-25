@@ -30,7 +30,7 @@ from generate_report_from_sheet import (
 )
 
 CACHE_TTL_SECONDS = 300
-DAILY_REPORT_CHAT_ID = -5052868617
+DAILY_REPORT_CHAT_ID = -1003414665888
 ADMIN_IDS = [257026813]
 
 logger = logging.getLogger("cbc_bot")
@@ -319,8 +319,8 @@ async def daily_report_loop(
     bot: Bot,
     service: SheetDataService,
     chat_id: int,
-    hour: int = 18,
-    minute: int = 0,
+    hour: int = 22,
+    minute: int = 8,
 ) -> None:
     logger.info(
         "Daily report scheduling enabled for chat_id=%s at %02d:%02d",
