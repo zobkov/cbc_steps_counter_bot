@@ -319,8 +319,8 @@ async def daily_report_loop(
     bot: Bot,
     service: SheetDataService,
     chat_id: int,
-    hour: int = 22,
-    minute: int = 8,
+    hour: int = 18,
+    minute: int = 0,
 ) -> None:
     logger.info(
         "Daily report scheduling enabled for chat_id=%s at %02d:%02d",
